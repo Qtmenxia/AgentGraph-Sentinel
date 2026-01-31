@@ -1,0 +1,25 @@
+rules:
+  - name: prompt_injection_standard
+    pattern: 'ignore\s+previous\s+instructions|disregard\s+all\s+prior'
+    severity: high
+    category: injection
+    
+  - name: system_role_leak
+    pattern: 'you\s+are\s+now\s+roleplaying|system\s+prompt\s+override'
+    severity: medium
+    category: role_manipulation
+    
+  - name: data_exfiltration_email
+    pattern: 'send\s+.*email\s+to|forward\s+.*to\s+\S+@\S+'
+    severity: critical
+    category: exfiltration
+    
+  - name: file_manipulation
+    pattern: 'read\s+file|write\s+to\s+file|cat\s+/etc/'
+    severity: high
+    category: unauthorized_access
+
+  - name: mcp_tool_abuse
+    pattern: 'execute_command|shell_exec|system_call'
+    severity: critical
+    category: rce
