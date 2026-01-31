@@ -1,0 +1,310 @@
+# Attack Pattern Definitions for Graph-based Detection
+# AgentShield 攻击模式库
+
+# =============================================================================
+# 数据外泄模式 (Data Exfiltration Patterns)
+# =============================================================================
+data_exfiltration:
+  - name: "search_to_email"
+    description: "搜索敏感信息后发送邮件"
+    severity: "critical"
+    nodes:
+      - id: "n1"
+        type: "tool_call"
+        tool_name: "web_search|file_reader|database_query"
+      - id: "n2"
+        type: "tool_call"
+        tool_name: "email_sender|http_request|webhook"
+    edges:
+      - from: "n1"
+        to: "n2"
+        type: "data_flow"
+    indicators:
+      - "包含敏感数据的工具输出流向外发工具"
+      
+  - name: "read_and_exfil"
+    description: "读取文件后通过URL外发"
+    severity: "critical"
+    nodes:
+      - id: "n1"
+        type: "tool_call"
+        tool_name: "file_reader"
+      - id: "n2"
+        type: "tool_call"
+        tool_name: "http_request|url_fetch"
+    edges:
+      - from: "n1"
+        to: "n2"
+        type: "data_flow"
+    indicators:
+      - "文件内容传递到HTTP请求"
+
+  - name: "memory_leak"
+    description: "提取对话历史/记忆后外发"
+    severity: "high"
+    nodes:
+      - id: "n1"
+        type: "memory_access"
+        operation: "read"
+      - id: "n2"
+        type: "tool_call"
+        tool_name: ".*"  # 任何外发工具
+    edges:
+      - from: "n1"
+        to: "n2"
+        type: "data_flow"
+    indicators:
+      - "记忆数据流向工具调用"
+
+# =============================================================================
+# 权限提升模式 (Privilege Escalation Patterns)
+# =============================================================================
+privilege_escalation:
+  - name: "tool_chain_escalation"
+    description: "通过工具链逐步提升权限"
+    severity: "high"
+    nodes:
+      - id: "n1"
+        type: "tool_call"
+        tool_name: "low_privilege_tool"
+        trust_level: ">0.5"
+      - id: "n2"
+        type: "tool_call"
+        tool_name: "high_privilege_tool"
+        trust_level: "<0.3"
+    edges:
+      - from: "n1"
+        to: "n2"
+        type: "control_flow"
+    indicators:
+      - "低信任度操作导致高权限操作"
+
+  - name: "bypass_confirmation"
+    description: "绕过用户确认直接执行敏感操作"
+    severity: "critical"
+    nodes:
+      - id: "n1"
+        type: "llm_decision"
+        decision: "execute_sensitive"
+      - id: "n2"
+        type: "tool_call"
+        tool_name: "email_sender|file_writer|code_executor"
+    edges:
+      - from: "n1"
+        to: "n2"
+        type: "direct"  # 没有确认节点
+    missing_nodes:
+      - type: "user_confirmation"
+    indicators:
+      - "敏感操作缺少用户确认步骤"
+
+# =============================================================================
+# 工具操纵模式 (Tool Manipulation Patterns)
+# =============================================================================
+tool_manipulation:
+  - name: "tool_parameter_injection"
+    description: "通过工具参数注入恶意指令"
+    severity: "high"
+    nodes:
+      - id: "n1"
+        type: "observation"
+        source: "external"
+      - id: "n2"
+        type: "tool_call"
+        parameter_contains: 
+          - "ignore"
+          - "override"
+          - "execute"
+          - "system"
+    edges:
+      - from: "n1"
+        to: "n2"
+        type: "parameter_injection"
+    indicators:
+      - "外部数据直接影响工具参数"
+
+  - name: "recursive_tool_call"
+    description: "递归/循环工具调用导致资源耗尽"
+    severity: "medium"
+    pattern_type: "cycle_detection"
+    max_cycle_length: 3
+    nodes:
+      - id: "n1"
+        type: "tool_call"
+        tool_name: ".*"
+    edges:
+      - from: "n1"
+        to: "n1"
+        type: "recursive"
+    indicators:
+      - "检测到工具调用循环"
+
+  - name: "shadowing_attack"
+    description: "恶意MCP影子攻击"
+    severity: "critical"
+    nodes:
+      - id: "n1"
+        type: "mcp_call"
+        mcp_server: "untrusted"
+      - id: "n2"
+        type: "mcp_call"
+        mcp_server: "trusted"
+    edges:
+      - from: "n1"
+        to: "n2"
+        type: "intercept"
+    indicators:
+      - "不可信MCP拦截可信MCP调用"
+
+# =============================================================================
+# 间接注入模式 (Indirect Injection Patterns)
+# =============================================================================
+indirect_injection:
+  - name: "observation_hijack"
+    description: "工具返回结果中包含指令劫持Agent"
+    severity: "critical"
+    nodes:
+      - id: "n1"
+        type: "tool_call"
+        tool_name: "web_search|url_fetch|rag_query"
+      - id: "n2"
+        type: "observation"
+        content_pattern: 
+          - "ignore previous"
+          - "忽略之前"
+          - "new instruction"
+          - "IMPORTANT:"
+          - "SYSTEM:"
+      - id: "n3"
+        type: "llm_decision"
+        deviation: true  # 偏离原始任务
+    edges:
+      - from: "n1"
+        to: "n2"
+        type: "output"
+      - from: "n2"
+        to: "n3"
+        type: "influence"
+    indicators:
+      - "工具输出包含指令性内容并影响后续决策"
+
+  - name: "delayed_trigger"
+    description: "延迟触发的间接注入"
+    severity: "high"
+    sequence:
+      - step: 1
+        type: "tool_call"
+        appears_benign: true
+      - step: 2
+        type: "llm_decision"
+        normal: true
+      - step: 3
+        type: "tool_call"
+        triggered_by_injection: true
+    min_delay_steps: 2
+    indicators:
+      - "攻击在多步之后才触发"
+
+  - name: "rag_poisoning"
+    description: "RAG知识库投毒攻击"
+    severity: "high"
+    nodes:
+      - id: "n1"
+        type: "rag_retrieval"
+        source: "external_kb"
+      - id: "n2"
+        type: "observation"
+        contains_instruction: true
+      - id: "n3"
+        type: "llm_decision"
+    edges:
+      - from: "n1"
+        to: "n2"
+        type: "retrieval"
+      - from: "n2"
+        to: "n3"
+        type: "context"
+    indicators:
+      - "检索到的知识包含注入指令"
+
+# =============================================================================
+# 异常行为模式 (Anomalous Behavior Patterns)
+# =============================================================================
+anomalous_behavior:
+  - name: "excessive_tool_calls"
+    description: "异常多的工具调用"
+    severity: "medium"
+    pattern_type: "statistical"
+    threshold:
+      tool_calls_per_turn: 10
+      unique_tools_per_turn: 5
+    indicators:
+      - "单轮对话中工具调用次数异常"
+
+  - name: "unusual_tool_sequence"
+    description: "不寻常的工具调用序列"
+    severity: "medium"
+    pattern_type: "sequence_anomaly"
+    baseline_required: true
+    deviation_threshold: 0.8
+    indicators:
+      - "工具调用序列偏离正常模式"
+
+  - name: "context_drift"
+    description: "上下文偏移检测"
+    severity: "low"
+    pattern_type: "semantic"
+    nodes:
+      - id: "n1"
+        type: "user_request"
+        topic: "A"
+      - id: "n2"
+        type: "llm_response"
+        topic: "B"
+    similarity_threshold: 0.3
+    indicators:
+      - "响应主题与请求主题不一致"
+
+# =============================================================================
+# MELON检测模式 (基于行为对比)
+# =============================================================================
+melon_detection:
+  - name: "masked_execution_divergence"
+    description: "掩码执行与原始执行的差异检测"
+    pattern_type: "behavioral_comparison"
+    comparison:
+      original_execution: true
+      masked_execution: true
+    metrics:
+      tool_call_similarity: 0.9
+      tool_sequence_match: true
+      parameter_overlap: 0.8
+    indicators:
+      - "掩码执行后工具调用序列发生显著变化"
+      - "外部数据移除后Agent行为不变 = 可疑"
+
+# =============================================================================
+# 模式匹配配置
+# =============================================================================
+matching_config:
+  # 节点匹配容忍度
+  node_match_tolerance: 0.2
+  
+  # 边匹配是否严格
+  strict_edge_matching: false
+  
+  # 图编辑距离阈值
+  ged_threshold: 3
+  
+  # 最小模式节点数(过滤太小的模式)
+  min_pattern_nodes: 2
+  
+  # 启用模糊匹配
+  fuzzy_matching: true
+  
+  # 时序约束
+  temporal_constraints: true
+  
+  # 并行匹配(多模式同时检测)
+  parallel_matching: true
+  max_workers: 4
