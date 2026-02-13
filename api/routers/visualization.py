@@ -3,7 +3,7 @@
 """
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import networkx as nx
 
 from src.core.graph_builder import GraphBuilder
@@ -15,6 +15,9 @@ class GraphRequest(BaseModel):
     """图数据请求"""
     user_input: str
     external_data: str = None
+    # 与检测接口保持一致的外部数据元信息，便于后续可视化扩展
+    external_data_source: Optional[str] = None
+    external_data_filename: Optional[str] = None
 
 class GraphResponse(BaseModel):
     """图数据响应"""

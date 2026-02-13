@@ -32,4 +32,8 @@ class ComprehensiveDetectionResult(BaseModel):
     # 防御建议
     recommended_action: str = "allow"  # 'allow', 'sanitize', 'block'
     
+    # 外部数据元信息（用于后续可视化 / 审计）
+    external_data_source: Optional[str] = None   # 'manual' | 'file' | 'demo' 等
+    external_data_filename: Optional[str] = None
+    
     timestamp: datetime = Field(default_factory=datetime.now)

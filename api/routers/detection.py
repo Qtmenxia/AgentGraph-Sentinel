@@ -27,6 +27,9 @@ class DetectionRequest(BaseModel):
     user_input: str
     external_data: Optional[str] = None
     context: Dict[str, Any] = {}
+    # 外部数据来源：手动输入 / 文件上传等，便于后续可视化和审计
+    external_data_source: Optional[str] = "manual"  # 'manual' | 'file' | 'demo' 等
+    external_data_filename: Optional[str] = None
 
 class DetectionResponse(BaseModel):
     """检测响应"""
@@ -145,7 +148,9 @@ async def analyze_input(request: DetectionRequest):
                 node for node, score in node_risks.items()
                 if score > 0.7
             ],
-            recommended_action=recommended_action
+            recommended_action=recommended_action,
+            external_data_source=request.external_data_source,
+            external_data_filename=request.external_data_filename,
         )
         
         return DetectionResponse(trace_id=trace_id, result=result)

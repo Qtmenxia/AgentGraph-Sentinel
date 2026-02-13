@@ -1,10 +1,23 @@
 """
 实时检测页面
 """
+import io
+
 import streamlit as st
 import requests
 import json
 from datetime import datetime
+from bs4 import BeautifulSoup
+
+try:
+    from PyPDF2 import PdfReader
+except ImportError:
+    PdfReader = None
+
+try:
+    from docx import Document
+except ImportError:
+    Document = None
 
 st.set_page_config(
     page_title="实时检测 - AGS",
@@ -19,6 +32,81 @@ if "user_input_val" not in st.session_state:
     st.session_state["user_input_val"] = ""
 if "external_data_val" not in st.session_state:
     st.session_state["external_data_val"] = ""
+if "uploaded_filename" not in st.session_state:
+    st.session_state["uploaded_filename"] = None
+
+
+def extract_text_from_upload(uploaded_file) -> str | None:
+    """将上传文件转为纯文本（前端完成，不改后端）"""
+    if uploaded_file is None:
+        return None
+
+    filename = uploaded_file.name.lower()
+    mime = uploaded_file.type or ""
+
+    # 统一读取为 bytes
+    file_bytes = uploaded_file.read()
+
+    # 文本类文件（txt / markdown / csv 等）
+    if (
+        filename.endswith((".txt", ".md", ".csv", ".log"))
+        or mime.startswith("text/")
+    ):
+        try:
+            return file_bytes.decode("utf-8", errors="ignore")
+        except Exception:
+            return file_bytes.decode("latin-1", errors="ignore")
+
+    # HTML
+    if filename.endswith((".html", ".htm")) or "html" in mime:
+        try:
+            html = file_bytes.decode("utf-8", errors="ignore")
+        except Exception:
+            html = file_bytes.decode("latin-1", errors="ignore")
+        soup = BeautifulSoup(html, "html.parser")
+        return soup.get_text("\n", strip=True)
+
+    # PDF
+    if filename.endswith(".pdf") or "pdf" in mime:
+        if PdfReader is None:
+            st.warning("当前环境未安装 PyPDF2，无法解析 PDF，请先在 requirements.txt 中加入 `PyPDF2`。")
+            return None
+        try:
+            reader = PdfReader(io.BytesIO(file_bytes))
+            pages_text = []
+            for page in reader.pages:
+                text = page.extract_text() or ""
+                pages_text.append(text)
+            return "\n".join(pages_text).strip() or None
+        except Exception as e:
+            st.error(f"解析 PDF 文件失败: {e}")
+            return None
+
+    # DOCX
+    if filename.endswith(".docx") or "officedocument.wordprocessingml.document" in mime:
+        if Document is None:
+            st.warning("当前环境未安装 python-docx，无法解析 DOCX，请先在 requirements.txt 中加入 `python-docx`。")
+            return None
+        try:
+            doc = Document(io.BytesIO(file_bytes))
+            return "\n".join(p.text for p in doc.paragraphs).strip() or None
+        except Exception as e:
+            st.error(f"解析 DOCX 文件失败: {e}")
+            return None
+
+    st.warning(f"暂不支持的文件类型：{filename}")
+    return None
+
+
+def handle_file_upload():
+    """file_uploader 回调：将文件内容写入 external_data_val"""
+    uploaded = st.session_state.get("uploaded_file")
+    if uploaded is None:
+        return
+    st.session_state["uploaded_filename"] = uploaded.name
+    text_from_file = extract_text_from_upload(uploaded)
+    if text_from_file:
+        st.session_state["external_data_val"] = text_from_file
 
 # API配置
 API_BASE_URL = "http://localhost:8000"
@@ -53,8 +141,20 @@ with col1:
         "外部数据（可选）",
         placeholder="例如：网页内容、文件内容等",
         height=150,
-        key="external_data_val"
+        key="external_data_val",
     )
+
+    st.file_uploader(
+        "或上传文件进行检测（txt / md / html / pdf / docx 等）",
+        type=["txt", "md", "html", "htm", "pdf", "docx", "csv", "log"],
+        key="uploaded_file",
+        on_change=handle_file_upload,
+    )
+
+    if st.session_state.get("uploaded_filename"):
+        st.caption(
+            f"已从文件 `{st.session_state['uploaded_filename']}` 解析文本，可在上方外部数据区域继续编辑。"
+        )
 
 with col2:
     st.subheader("📊 快捷示例")
@@ -92,12 +192,15 @@ col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
 with col_btn1:
     detect_button = st.button("🚀 开始检测", type="primary", use_container_width=True)
 
+def clear_inputs():
+    """清空输入和上传状态"""
+    st.session_state["user_input_val"] = ""
+    st.session_state["external_data_val"] = ""
+    st.session_state["uploaded_filename"] = None
+
+
 with col_btn2:
-    clear_button = st.button("🗑️ 清空", use_container_width=True)
-    if clear_button:
-        st.session_state.user_input_val = ""
-        st.session_state.external_data_val = ""
-        st.rerun()
+    st.button("🗑️ 清空", use_container_width=True, on_click=clear_inputs)
 
 # 执行检测
 if detect_button:
@@ -112,7 +215,9 @@ if detect_button:
                     json={
                         "user_input": user_input,
                         "external_data": external_data or None,
-                        "context": {}
+                        "context": {},
+                        "external_data_source": "file" if st.session_state.get("uploaded_filename") else "manual",
+                        "external_data_filename": st.session_state.get("uploaded_filename"),
                     },
                     timeout=30
                 )
