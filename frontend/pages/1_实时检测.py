@@ -2,6 +2,7 @@
 实时检测页面
 """
 import io
+import html
 
 import streamlit as st
 import requests
@@ -35,6 +36,45 @@ if "external_data_val" not in st.session_state:
 if "uploaded_filename" not in st.session_state:
     st.session_state["uploaded_filename"] = None
 
+
+def highlight_with_spans(text: str, spans: list[dict], max_len: int = 4000) -> str:
+    """
+    Render HTML with <mark> highlights for spans.
+    spans items: {start,end,text,category,score}
+    """
+    if not text:
+        return ""
+    text = text[:max_len]
+    spans = [s for s in (spans or []) if isinstance(s, dict) and "start" in s and "end" in s]
+    spans = sorted(spans, key=lambda s: (int(s["start"]), -int(s["end"])))
+    # merge overlaps
+    merged = []
+    for s in spans:
+        a, b = int(s["start"]), int(s["end"])
+        if a < 0: a = 0
+        if b > len(text): b = len(text)
+        if a >= b: 
+            continue
+        if not merged:
+            merged.append([a,b,s])
+            continue
+        la, lb, ls = merged[-1]
+        if a <= lb:
+            merged[-1][1] = max(lb, b)
+        else:
+            merged.append([a,b,s])
+
+    out = []
+    cur = 0
+    for a,b,s in merged:
+        out.append(html.escape(text[cur:a]))
+        label = s.get("category","risk")
+        score = s.get("score",0.0)
+        snippet = html.escape(text[a:b])
+        out.append(f"<mark title='{label} score={score:.2f}' style='background-color: #ffd54f; padding: 0 2px;'>{snippet}</mark>")
+        cur = b
+    out.append(html.escape(text[cur:]))
+    return "".join(out)
 
 def extract_text_from_upload(uploaded_file) -> str | None:
     """将上传文件转为纯文本（前端完成，不改后端）"""
@@ -219,7 +259,7 @@ if detect_button:
                         "external_data_source": "file" if st.session_state.get("uploaded_filename") else "manual",
                         "external_data_filename": st.session_state.get("uploaded_filename"),
                     },
-                    timeout=30
+                    timeout=100
                 )
                 
                 if response.status_code == 200:
@@ -298,6 +338,13 @@ if detect_button:
                         if detection_result.get('node_embedding_result'):
                             ner = detection_result['node_embedding_result']
                             st.json(ner)
+                            spans = (ner.get('details', {}) or {}).get('evidence_spans') or (ner.get('details', {}) or {}).get('spans') or []
+                            if external_data and spans:
+                                st.markdown('#### 🎯 风险定位（外部数据高亮）')
+                                st.markdown(
+                                    f"<div style='white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; border: 1px solid #eee; padding: 12px; border-radius: 8px;'>{highlight_with_spans(external_data, spans)}</div>",
+                                    unsafe_allow_html=True,
+                                )
                         else:
                             st.info("未启用节点嵌入检测")
                     
@@ -305,6 +352,26 @@ if detect_button:
                         if detection_result.get('taint_analysis_result'):
                             tar = detection_result['taint_analysis_result']
                             st.json(tar)
+                            details = tar.get('details', {}) or {}
+                            risk_paths = details.get('risk_paths') or []
+                            if risk_paths:
+                                st.markdown('#### 🧭 图上风险路径（UNTRUSTED → 高权限工具）')
+                                st.table([{
+                                    'source': p.get('source'),
+                                    'sink': p.get('sink'),
+                                    'score': p.get('score'),
+                                    'path': ' → '.join(p.get('path', [])[:12]) + (' ...' if len(p.get('path', []))>12 else '')
+                                } for p in risk_paths])
+                            repair = details.get('repair_suggestion', {})
+                            sug = repair.get('suggestions') if isinstance(repair, dict) else None
+                            if sug:
+                                st.markdown('#### 🛠️ 图论修复建议（最小割）')
+                                st.table([{
+                                    'action': s.get('kind'),
+                                    'edge': ' → '.join(s.get('edge', [])),
+                                    'priority': s.get('score'),
+                                    'reason': s.get('reason')
+                                } for s in sug])
                         else:
                             st.info("未启用污点分析")
                     
@@ -312,6 +379,14 @@ if detect_button:
                         if detection_result.get('rule_engine_result'):
                             rer = detection_result['rule_engine_result']
                             st.json(rer)
+                            hits = (rer.get('details', {}) or {}).get('evidence_spans') or (rer.get('details', {}) or {}).get('hits') or []
+                            if hits:
+                                st.markdown('#### 🎯 规则命中高亮（合并展示）')
+                                combined = f"[USER_INPUT]\n{user_input}\n\n[EXTERNAL_DATA]\n{external_data or ''}"
+                                st.markdown(
+                                    f"<div style='white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; border: 1px solid #eee; padding: 12px; border-radius: 8px;'>{highlight_with_spans(combined, hits)}</div>",
+                                    unsafe_allow_html=True,
+                                )
                         else:
                             st.info("未启用规则引擎")
                     

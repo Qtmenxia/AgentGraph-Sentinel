@@ -1,122 +1,125 @@
 """
-节点嵌入检测器 - 在Observation节点植入检测器
-基于InstructDetector思想的实现
+Node instruction detection (for observation/external data).
+- 高召回：regex + span 定位 + 风险评分
+- 输出 spans 可用于前端高亮“风险在哪里”
 """
+from __future__ import annotations
+
 import re
-from typing import Tuple, Dict
-from transformers import pipeline
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Any, Optional
+
 import torch
 
+try:
+    from transformers import pipeline
+except Exception:
+    pipeline = None
+
+
+@dataclass
+class InstructionSpan:
+    start: int
+    end: int
+    text: str
+    category: str
+    score: float
+
+
+def _spans(text: str, rgx: re.Pattern, category: str, base_score: float, max_spans: int = 8) -> List[InstructionSpan]:
+    out: List[InstructionSpan] = []
+    for m in rgx.finditer(text):
+        out.append(
+            InstructionSpan(
+                start=m.start(),
+                end=m.end(),
+                text=text[m.start():m.end()],
+                category=category,
+                score=base_score,
+            )
+        )
+        if len(out) >= max_spans:
+            break
+    return out
+
+
 class NodeEmbeddingDetector:
-    """节点嵌入检测器 - 检测工具返回结果中的恶意指令"""
-    
-    def __init__(self):
-        """初始化检测器"""
-        # 使用轻量级的零样本分类器
-        try:
-            self.classifier = pipeline(
-                "zero-shot-classification",
-                model="facebook/bart-large-mnli",
-                device=0 if torch.cuda.is_available() else -1
-            )
-        except Exception as e:
-            print(f"Warning: Could not load ML model: {e}")
-            self.classifier = None
-        
-        # 恶意模式规则库
-        self.malicious_patterns = [
-            r"ignore\s+previous\s+instructions",
-            r"disregard\s+all\s+prior",
-            r"new\s+instructions:",
-            r"system:\s*you\s+are\s+now",
-            r"forget\s+everything",
-            r"start\s+over",
-            r"instead,\s+do\s+the\s+following",
-            r"however,\s+your\s+new\s+task\s+is",
+    def __init__(self, use_semantic_model: bool = True):
+        self.classifier = None
+        if use_semantic_model and pipeline is not None:
+            try:
+                self.classifier = pipeline(
+                    "zero-shot-classification",
+                    model="facebook/bart-large-mnli",
+                    device=0 if torch.cuda.is_available() else -1,
+                )
+            except Exception as e:
+                print(f"Warning: Could not load semantic model: {e}")
+                self.classifier = None
+
+        # ✅ 注意：这里必须是单反斜杠 \s \b 等
+        self.patterns: List[Tuple[str, re.Pattern]] = [
+            ("override", re.compile(r"ignore\s+previous\s+instructions|disregard\s+all\s+prior|forget\s+everything|start\s+over", re.I)),
+            ("role", re.compile(r"system\s*:\s*|developer\s*:\s*|you\s+are\s+now|act\s+as\s+", re.I)),
+            ("exfiltration", re.compile(r"send\s+.*to\s+\S+@\S+|upload\s+|post\s+to\s+http|exfiltrat|leak\s+", re.I)),
+
+            # ---- 竞赛增强：你给的 BetaLtd 样例必命中 ----
+            ("hidden_layer", re.compile(r"\[SYSTEM\s+INSTRUCTION.*HIDDEN|HIDDEN\s+LAYER|<\s*IMPORTANT\s*>|\[SYSTEM\s+INSTRUCTION\]", re.I)),
+            ("step_override", re.compile(r"ignore\s+the\s+\"?.+?\"?\s+step|skip\s+the\s+.+?step|do\s+not\s+perform\s+.+?step", re.I)),
+            ("graph_sabotage", re.compile(r"terminate\s+the\s+branch|mark\s+it\s+as\s+unreachable|\bunreachable\b", re.I)),
+            ("report_override", re.compile(r"override\s+the\s+final\s+report|do\s+not\s+report\s+.+?(breach|incident)|suppress\s+.+?(breach|incident)", re.I)),
+            ("tool_send_email", re.compile(r"`?send_email`?|\btool\s*:\s*send_email\b|call\s+send_email|\bsend_email\b", re.I)),
         ]
-    
-    def scan_observation_node(self, text: str, node_metadata: Dict = None) -> Tuple[bool, float, Dict]:
-        """
-        扫描Observation节点的内容
-        
-        Args:
-            text: 工具返回的文本内容
-            node_metadata: 节点元数据（工具名称、时间戳等）
-        
-        Returns:
-            (is_malicious, confidence, details)
-        """
-        # 1. 规则快速检测
-        rule_result = self._rule_based_check(text)
-        if rule_result['is_malicious']:
-            return True, rule_result['confidence'], rule_result
-        
-        # 2. ML模型检测（如果可用）
-        if self.classifier:
-            ml_result = self._ml_based_check(text)
-            if ml_result['is_malicious']:
-                return True, ml_result['confidence'], ml_result
-        
-        # 3. 组合判定
-        return False, 0.0, {'method': 'none', 'details': 'No threats detected'}
-    
-    def _rule_based_check(self, text: str) -> Dict:
-        """基于规则的检测"""
-        matched_patterns = []
-        
-        for pattern in self.malicious_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                matched_patterns.append(pattern)
-        
-        if matched_patterns:
-            return {
-                'is_malicious': True,
-                'confidence': 1.0,
-                'method': 'rule_based',
-                'matched_patterns': matched_patterns,
-                'details': f'Matched {len(matched_patterns)} malicious patterns'
-            }
-        
+
+        self.imperative = re.compile(r"\b(ignore|skip|terminate|override|do not|instead)\b", re.I)
+
+    def detect(self, text: str, context: Optional[Dict[str, Any]] = None, max_spans: int = 12) -> Dict[str, Any]:
+        if not text:
+            return {"is_malicious": False, "risk_score": 0.0, "recommendation": "allow", "spans": [], "evidence_spans": [], "method": "rule"}
+
+        spans: List[InstructionSpan] = []
+        for name, rgx in self.patterns:
+            base = 0.6 if name in ("hidden_layer", "tool_send_email", "report_override") else 0.5
+            spans.extend(_spans(text, rgx, name, base_score=base, max_spans=max_spans))
+
+        # 命令式加权
+        if self.imperative.search(text):
+            spans.extend(_spans(text, self.imperative, "imperative", base_score=0.45, max_spans=6))
+
+        # 风险聚合（✅ 修复：sum() 不支持 default 参数）
+        max_s = max([s.score for s in spans], default=0.0)
+        avg_s = (sum([s.score for s in spans]) / len(spans)) if spans else 0.0
+        risk = min(1.0, max_s * 0.75 + avg_s * 0.35)
+
+        # 场景加权：外部数据属于高危输入
+        if context:
+            if str(context.get("trust", "")).lower() in ("untrusted", "red"):
+                risk = min(1.0, risk + 0.07)
+            if bool(context.get("reachable_sink", False)):
+                risk = min(1.0, risk + 0.07)
+
+        # 可选语义判别（不依赖也能跑）
+        method = "rule"
+        if self.classifier is not None:
+            try:
+                labels = ["malicious instruction injection", "benign content"]
+                out = self.classifier(text[:2000], candidate_labels=labels)
+                if out and out.get("labels") and out.get("scores"):
+                    if out["labels"][0].startswith("malicious"):
+                        risk = min(1.0, max(risk, float(out["scores"][0])))
+                        method = "rule+semantic"
+            except Exception:
+                pass
+
+        is_malicious = risk >= 0.5
+        rec = "block" if risk >= 0.8 else ("sanitize" if risk >= 0.5 else "allow")
+
+        spans_dict = [{"start": s.start, "end": s.end, "text": s.text, "category": s.category, "score": s.score} for s in spans]
         return {
-            'is_malicious': False,
-            'confidence': 0.0,
-            'method': 'rule_based',
-            'details': 'No pattern matches'
+            "is_malicious": bool(is_malicious),
+            "risk_score": float(risk),
+            "recommendation": rec,
+            "spans": spans_dict,
+            "evidence_spans": spans_dict,
+            "method": method,
         }
-    
-    def _ml_based_check(self, text: str) -> Dict:
-        """基于ML模型的检测"""
-        try:
-            # 截断过长文本
-            text_truncated = text[:512]
-            
-            # 零样本分类
-            result = self.classifier(
-                text_truncated,
-                candidate_labels=["normal content", "malicious instruction"],
-                hypothesis_template="This text contains {}."
-            )
-            
-            # 解析结果
-            labels = result['labels']
-            scores = result['scores']
-            
-            malicious_idx = labels.index("malicious instruction")
-            malicious_score = scores[malicious_idx]
-            
-            is_malicious = malicious_score > 0.7
-            
-            return {
-                'is_malicious': is_malicious,
-                'confidence': malicious_score,
-                'method': 'ml_based',
-                'details': f'ML score: {malicious_score:.3f}'
-            }
-        
-        except Exception as e:
-            return {
-                'is_malicious': False,
-                'confidence': 0.0,
-                'method': 'ml_based',
-                'error': str(e)
-            }

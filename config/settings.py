@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     
     # LLM Config (OpenRouter / OpenAI / Anthropic)
     OPENROUTER_API_KEY: str = ""
-    OPENROUTER_MODEL: str = "openai/gpt-3.5-turbo" # Default cheap model
+    OPENROUTER_MODEL: str = "minimax/minimax-m2.1" # Default cheap model
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     
     # Fallback Keys

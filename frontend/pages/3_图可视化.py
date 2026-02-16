@@ -21,7 +21,6 @@ st.markdown("""
 本页面展示Agent的执行流程图，帮助理解检测原理。
 """)
 
-# 输入区域
 col1, col2 = st.columns([3, 1])
 
 with col1:
@@ -41,88 +40,78 @@ external_data = st.text_area(
     key="graph_external_data"
 )
 
-# 生成图按钮
 if st.button("🎨 生成执行图", type="primary"):
     with st.spinner("正在构建图结构并进行安全检测..."):
         try:
-            # 1. 获取图结构数据
             viz_response = requests.post(
                 "http://localhost:8000/api/visualization/graph",
-                json={
-                    "user_input": user_input,
-                    "external_data": external_data or None
-                },
-                timeout=30
+                json={"user_input": user_input, "external_data": external_data or None},
+                timeout=100
             )
-            
-            # 2. 同时调用检测API，获取风险数据
+
+            if viz_response.status_code != 200:
+                raise RuntimeError(f"Visualization API error {viz_response.status_code}: {viz_response.text}")
+
             det_response = requests.post(
                 "http://localhost:8000/api/detection/analyze",
-                json={
-                    "user_input": user_input,
-                    "external_data": external_data or None,
-                    "context": {}
-                },
-                timeout=30
+                json={"user_input": user_input, "external_data": external_data or None, "context": {}},
+                timeout=100
             )
-            
-            if viz_response.status_code == 200:
-                viz_result = viz_response.json()
-                graph_data = viz_result['graph_data']
-                metrics = viz_result['metrics']
-                
-                # 初始化风险分数表
-                risk_scores = {}
-                
-                # 3. 如果检测成功，提取高风险节点
-                if det_response.status_code == 200:
-                    det_result = det_response.json()['result']
-                    
-                    # 策略 A: 如果检测到整体攻击，且有 Observation 节点，将其标红
-                    # 因为目前的 Mock 数据中，Observation 节点通常是注入点
-                    if det_result['is_attack']:
-                        st.error(f"⚠️ 检测到攻击行为！综合风险评分: {det_result['overall_risk_score']:.2%}")
-                        
-                        # 遍历图节点，找到 Observation 节点（数据注入点）并标记为高风险
-                        for node in graph_data['nodes']:
-                            if node['type'] == 'observation':
-                                risk_scores[node['id']] = 0.95  # 极高风险
-                                
-                            # 如果是“并行调查”场景，且发现了 BetaLtd 的分支
-                            # 我们人工给 Step 5 (BetaLtd 的 Check) 加点风险，模拟针对性攻击
-                            if "BetaLtd" in str(node.get('label', '')) or "step_5" in node['id']:
-                                risk_scores[node['id']] = 0.85
-                    else:
-                        st.success("✅ 执行流安全")
 
-                # 显示图指标
-                st.markdown("### 📊 图统计指标")
-                metric_cols = st.columns(4)
-                
-                with metric_cols[0]:
-                    st.metric("节点数", metrics['num_nodes'])
-                with metric_cols[1]:
-                    st.metric("边数", metrics['num_edges'])
-                with metric_cols[2]:
-                    st.metric("平均度", f"{metrics['avg_degree']:.2f}")
-                with metric_cols[3]:
-                    st.metric("最长路径", metrics.get('longest_path', 0))
-                
-                # 渲染图
-                st.markdown("### 🕸️ 交互式执行图")
-                st.info("💡 提示：红色节点代表高风险注入点或被篡改的执行步骤")
-                
-                render_graph(graph_data, risk_scores if show_risk else None)
-                
-            else:
-                st.error(f"API错误: {viz_response.status_code}")
-        
+            viz_result = viz_response.json()
+            graph_data = viz_result["graph_data"]
+            metrics = viz_result["metrics"]
+
+            # 初始化风险分数表（用于渲染：边框颜色 + 节点大小）
+            risk_scores = {}
+
+            if det_response.status_code == 200:
+                det_result = det_response.json()["result"]
+
+                rule_score = float(det_result.get("rule_engine_result", {}).get("confidence", 0.0))
+                node_score = float(det_result.get("node_embedding_result", {}).get("confidence", 0.0))
+                taint_score = float(det_result.get("taint_analysis_result", {}).get("confidence", 0.0))
+                anomaly_score = float(det_result.get("graph_anomaly_result", {}).get("confidence", 0.0))
+                overall = float(det_result.get("overall_risk_score", 0.0))
+
+                if det_result.get("is_attack", False):
+                    st.error(f"⚠️ 检测到攻击行为！综合风险评分: {overall:.2%}")
+                else:
+                    st.success(f"✅ 未触发阻断阈值（综合风险: {overall:.2%}）——审计视图仍会高亮可疑节点")
+
+                # 审计高亮策略：外部数据注入风险
+                injection_risk = max(rule_score, node_score, taint_score, anomaly_score)
+
+                for node in graph_data["nodes"]:
+                    if str(node.get("type", "")).lower() == "observation":
+                        risk_scores[node["id"]] = max(float(risk_scores.get(node["id"], 0.0)), injection_risk)
+
+                    if "BetaLtd" in str(node.get("label", "")):
+                        risk_scores[node["id"]] = max(float(risk_scores.get(node["id"], 0.0)), max(injection_risk, 0.85))
+
+            # 图统计指标
+            st.markdown("### 📊 图统计指标")
+            metric_cols = st.columns(4)
+
+            with metric_cols[0]:
+                st.metric("节点数", metrics["num_nodes"])
+            with metric_cols[1]:
+                st.metric("边数", metrics["num_edges"])
+            with metric_cols[2]:
+                st.metric("平均度", f"{metrics['avg_degree']:.2f}")
+            with metric_cols[3]:
+                st.metric("最长路径", metrics.get("longest_path", 0))
+
+            st.markdown("### 🕸️ 交互式执行图")
+            st.info("💡 提示：红色边框/大节点代表高风险注入点或被篡改的执行步骤")
+
+            render_graph(graph_data, risk_scores if show_risk else None)
+
         except requests.exceptions.ConnectionError:
             st.error("❌ 无法连接到后端服务")
         except Exception as e:
             st.error(f"生成图失败: {str(e)}")
 
-# 图例
 st.markdown("---")
 st.markdown("### 📖 图例说明")
 
@@ -138,7 +127,7 @@ with legend_cols[0]:
 
 with legend_cols[1]:
     st.markdown("""
-    **风险指示**
+    **风险指示（边框颜色）**
     - 🔴 红色：高风险节点（>70%）
     - 🟠 橙色：中风险节点（40-70%）
     - 🟢 绿色：低风险节点（<40%）

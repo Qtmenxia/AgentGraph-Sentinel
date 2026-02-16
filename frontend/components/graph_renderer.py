@@ -1,101 +1,151 @@
 """
 图可视化组件
+- 背景色：节点类型（Action/Tool/Observation）
+- 边框色：风险等级（低/中/高）
+- 节点大小：风险等级（小/中/大）
 """
 import streamlit as st
 import streamlit.components.v1 as components
 from pyvis.network import Network
-from typing import Dict, List
+from typing import Dict
 import tempfile
 import os
+
+
+_TYPE_BG = {
+    "action": "#3498db",       # 蓝
+    "tool": "#2ecc71",         # 绿
+    "observation": "#f39c12",  # 橙
+    "sanitizer": "#9b59b6",    # 紫
+    "user_input": "#1abc9c",   # 青
+    "unknown": "#95a5a6",
+}
+
+# 风险边框：绿(低) / 橙(中) / 红(高)
+def _risk_border(risk: float) -> str:
+    if risk >= 0.70:
+        return "#e74c3c"
+    if risk >= 0.40:
+        return "#f39c12"
+    return "#2ecc71"
+
+
+def _risk_size(risk: float) -> int:
+    # 让图例更“离散”：小/中/大
+    if risk >= 0.70:
+        return 42
+    if risk >= 0.40:
+        return 30
+    return 22
+
 
 def render_graph(graph_data: Dict, risk_scores: Dict = None):
     """
     渲染交互式图
-    
+
     Args:
         graph_data: 图数据 {'nodes': [...], 'edges': [...]}
-        risk_scores: 节点风险评分
+        risk_scores: 节点风险评分（0-1），用于边框+大小
     """
-    # 创建Network对象
     net = Network(
-        height="600px",
+        height="650px",
         width="100%",
         bgcolor="#ffffff",
         font_color="black",
-        directed=True
+        directed=True,
     )
-    
-    # 设置物理引擎
-    net.set_options("""
+
+    net.set_options(
+        """
     {
-        "physics": {
-            "enabled": true,
-            "hierarchicalRepulsion": {
-                "centralGravity": 0.0,
-                "springLength": 100,
-                "springConstant": 0.01,
-                "nodeDistance": 120,
-                "damping": 0.09
-            },
-            "solver": "hierarchicalRepulsion"
+      "physics": {
+        "enabled": true,
+        "hierarchicalRepulsion": {
+          "centralGravity": 0.0,
+          "springLength": 120,
+          "springConstant": 0.01,
+          "nodeDistance": 140,
+          "damping": 0.09
         },
-        "layout": {
-            "hierarchical": {
-                "enabled": true,
-                "direction": "LR",
-                "sortMethod": "directed"
-            }
+        "solver": "hierarchicalRepulsion",
+        "stabilization": {"iterations": 200}
+      },
+      "layout": {
+        "hierarchical": {
+          "enabled": true,
+          "direction": "LR",
+          "sortMethod": "directed",
+          "levelSeparation": 160,
+          "nodeSpacing": 140
         }
+      },
+      "edges": {
+        "smooth": {"type": "cubicBezier"},
+        "arrows": {"to": {"enabled": true}}
+      }
     }
-    """)
-    
-    # 添加节点
+    """
+    )
+
     risk_scores = risk_scores or {}
-    for node in graph_data.get('nodes', []):
-        node_id = node['id']
-        label = node.get('label', node_id)
-        node_type = node.get('type', 'unknown')
-        
-        # 根据风险评分设置颜色
-        risk = risk_scores.get(node_id, 0.0)
-        if risk > 0.7:
-            color = '#e74c3c'  # 红色 - 高风险
-        elif risk > 0.4:
-            color = '#f39c12'  # 橙色 - 中风险
-        else:
-            color = node.get('color', '#3498db')  # 默认颜色
-        
-        # 节点大小根据风险调整
-        size = 20 + (risk * 30)
-        
+
+    # Add nodes
+    for node in graph_data.get("nodes", []):
+        node_id = node["id"]
+        label = node.get("label", node_id)
+        node_type = (node.get("type", "unknown") or "unknown").lower()
+
+        risk = float(risk_scores.get(node_id, 0.0) or 0.0)
+        risk = max(0.0, min(1.0, risk))
+
+        bg = _TYPE_BG.get(node_type, _TYPE_BG["unknown"])
+        border = _risk_border(risk)
+        size = _risk_size(risk)
+
+        lane = int(node.get("lane", 0) or 0)
+        level = int(node.get("level", 0) or 0)
+        # 固定坐标：x=level, y=lane，让并行分支自然分开
+        x = level * 220
+        y = lane * 180
+
+        # PyVis 颜色支持 background/border
         net.add_node(
             node_id,
             label=label,
-            color=color,
+            color={"background": bg, "border": border},
+            borderWidth=3,
+            x=x,
+            y=y,
             size=size,
-            title=f"Type: {node_type}\nRisk: {risk:.2%}"
+            fixed={"x": True, "y": True},
+            title=(
+                f"<b>{label}</b><br/>"
+                f"Type: {node_type}<br/>"
+                f"Risk: {risk:.0%}<br/>"
+            ),
         )
-    
-    # 添加边
-    for edge in graph_data.get('edges', []):
+
+    # Add edges
+    for edge in graph_data.get("edges", []):
+        etype = edge.get("type", "default")
+        # data_flow 边更强调（虚线）
+        dashed = True if etype == "data_flow" else False
         net.add_edge(
-            edge['from'],
-            edge['to'],
-            label=edge.get('label', ''),
-            arrows='to'
+            edge["from"],
+            edge["to"],
+            label=edge.get("label", ""),
+            arrows="to",
+            dashes=dashed,
         )
-    
-    # 生成HTML
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.html', mode='w') as f:
+
+    # Generate HTML
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".html", mode="w", encoding="utf-8") as f:
         html_file = f.name
         net.save_graph(html_file)
-    
-    # 读取HTML
-    with open(html_file, 'r', encoding='utf-8') as f:
+
+    with open(html_file, "r", encoding="utf-8") as f:
         html_content = f.read()
-    
-    # 清理临时文件
+
     os.unlink(html_file)
-    
-    # 渲染
-    components.html(html_content, height=650)
+
+    components.html(html_content, height=700, scrolling=True)
